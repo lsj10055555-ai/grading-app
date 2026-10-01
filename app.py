@@ -2086,19 +2086,7 @@ def tab_env():
         for m in MIGRATION_LOG:
             st.caption("· " + m)
 
-    st.divider()
-    st.markdown("**대회 요건 자가점검**")
-    st.dataframe(pd.DataFrame(compliance_check()), use_container_width=True, hide_index=True)
-    st.caption("외부 전송 여부는 실행 중인 소스코드를 직접 검사한 결과입니다.")
-    with st.expander("소스코드 외부 통신 검사 상세"):
-        hits = scan_network_calls()
-        if hits:
-            st.warning("확인이 필요한 구문이 %d건 있습니다." % len(hits))
-            st.dataframe(pd.DataFrame(hits), use_container_width=True, hide_index=True)
-        else:
-            st.success("외부 통신에 사용되는 구문이 발견되지 않았습니다.")
-    st.markdown("**사용 구성요소 및 라이선스**")
-    st.dataframe(pd.DataFrame(LICENSES), use_container_width=True, hide_index=True)
+   
 
 
 # =====================================================================
