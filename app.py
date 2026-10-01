@@ -1548,9 +1548,47 @@ def default_item(n=1):
             "points": 10.0, "keywords": [{"term": "", "syn": "", "weight": 1.0, "required": False}]}
 
 
+_ITEM_FIELDS = (("q", "question"), ("m", "model_answer"),
+                ("v", "answer_value"), ("u", "unit"), ("p", "points"))
+
+
+def _item_key(prefix, i):
+    """문항 편집 위젯 키. 세트가 바뀌면 t_rev 가 올라가 키 자체가 새로 생긴다."""
+    return "%s_%d_%d" % (prefix, int(st.session_state.get("t_rev", 0)), i)
+
+
+def sync_items_from_widgets():
+    """화면 입력칸의 현재 값을 t_items 로 먼저 거둬들인다(버튼 처리 직전용)."""
+    ss = st.session_state
+    for i, it in enumerate(ss.get("t_items", [])):
+        for prefix, field in _ITEM_FIELDS:
+            k = _item_key(prefix, i)
+            if k in ss:
+                it[field] = ss[k]
+
+
+def reset_item_widgets():
+    """문항 세트가 통째로 바뀔 때 묵은 위젯 상태를 버리고 새 키로 갈아탄다.
+
+    Streamlit 은 key 가 이미 등록된 위젯에 대해서는 value= 인자를 무시하고
+    session_state 에 저장된 값을 돌려준다. 샘플을 불러와도 입력칸이 비어 보이던
+    원인이 이것이므로, 키 세대(t_rev)를 올려 완전히 새 위젯으로 만든다.
+    """
+    ss = st.session_state
+    old = int(ss.get("t_rev", 0))
+    for k in [k for k in list(ss.keys())
+              if re.match(r"^(q|m|v|u|p|kw)_%d_\d+$" % old, str(k))]:
+        try:
+            del ss[k]
+        except Exception:
+            pass
+    ss["t_rev"] = old + 1
+
+
 def tab_items():
     ss = st.session_state
     ss.setdefault("t_items", [default_item()])
+    ss.setdefault("t_rev", 0)
     ss.setdefault("t_title", "6학년 서술형 형성평가")
     ss.setdefault("t_subject", "과학")
     ss.setdefault("t_grade", "6학년")
@@ -1569,37 +1607,42 @@ def tab_items():
             ss["t_items"] = json.loads(json.dumps(sm["items"], ensure_ascii=False))
             ss["t_title"] = pick
             ss["t_subject"], ss["t_grade"] = sm["subject"], sm["grade"]
+            reset_item_widgets()
             st.rerun()
 
     st.divider()
     a1, a2 = st.columns(2)
     if a1.button("문항 추가", use_container_width=True):
+        sync_items_from_widgets()
         ss["t_items"].append(default_item())
+        reset_item_widgets()
         st.rerun()
     if a2.button("마지막 문항 삭제", use_container_width=True, disabled=len(ss["t_items"]) <= 1):
+        sync_items_from_widgets()
         ss["t_items"].pop()
+        reset_item_widgets()
         st.rerun()
 
     for i, it in enumerate(ss["t_items"]):
         with st.expander("%d번 문항  %s" % (i + 1, (it["question"][:34] + "…") if it["question"] else "(미작성)"),
                          expanded=(len(ss["t_items"]) <= 2)):
             it["question"] = st.text_area("문항 내용", value=it.get("question", ""),
-                                          height=90, key="q_%d" % i)
+                                          height=90, key=_item_key("q", i))
             it["model_answer"] = st.text_area("모범답안", value=it.get("model_answer", ""),
-                                              height=90, key="m_%d" % i)
+                                              height=90, key=_item_key("m", i))
             k1, k2, k3 = st.columns(3)
             it["answer_value"] = k1.text_input("최종 정답값", value=str(it.get("answer_value", "")),
-                                               key="v_%d" % i)
-            it["unit"] = k2.text_input("필수 단위", value=str(it.get("unit", "")), key="u_%d" % i)
+                                               key=_item_key("v", i))
+            it["unit"] = k2.text_input("필수 단위", value=str(it.get("unit", "")), key=_item_key("u", i))
             it["points"] = k3.number_input("배점", 1.0, 100.0, float(it.get("points", 10)),
-                                           step=1.0, key="p_%d" % i)
+                                           step=1.0, key=_item_key("p", i))
             st.caption("핵심 키워드 · 동의어는 쉼표로 구분 · 가중치가 클수록 점수 비중이 큽니다.")
             kdf = pd.DataFrame(it.get("keywords", []) or [{"term": "", "syn": "", "weight": 1.0, "required": False}])
             for col, dv in (("term", ""), ("syn", ""), ("weight", 1.0), ("required", False)):
                 if col not in kdf.columns:
                     kdf[col] = dv
             ed = st.data_editor(kdf[["term", "syn", "weight", "required"]], num_rows="dynamic",
-                                use_container_width=True, key="kw_%d" % i,
+                                use_container_width=True, key=_item_key("kw", i),
                                 column_config={"term": "키워드", "syn": "동의어(쉼표)",
                                                "weight": "가중치", "required": "필수"})
             it["keywords"] = [k for k in clean_records(ed) if str(k.get("term", "")).strip()]
