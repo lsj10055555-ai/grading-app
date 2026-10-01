@@ -849,14 +849,50 @@ def download_model_once(progress=None):
         set_offline(True)
 
 
+@st.cache_resource(show_spinner=False)  # <-- [추가] clear() AttributeError 오류 해결
 def get_embedder(prefer_local_path=""):
     """
     우선순위
-      1) sentence-transformers + jhgan/ko-sroberta-multitask  (models/ 폴더에 캐시)
-      2) transformers + mean pooling  (동일 모델, 수동 풀링)
-      3) TF-IDF 문자 n-gram           (완전 오프라인 폴백)
+      1) Hugging Face API (st.secrets["HF_TOKEN"] 설정 시 클라우드 모드)
+      2) sentence-transformers + jhgan/ko-sroberta-multitask  (models/ 폴더에 캐시)
+      3) transformers + mean pooling  (동일 모델, 수동 풀링)
+      4) TF-IDF 문자 n-gram           (완전 오프라인 폴백)
     반환: (encode_fn, info_dict)
     """
+    import requests
+    import numpy as np
+
+    # 1) Hugging Face Inference API 시도 (Streamlit Secrets에 HF_TOKEN이 있는 경우)
+    hf_token = st.secrets.get("HF_TOKEN", "")
+    if hf_token:
+        try:
+            api_url = "https://api-inference.huggingface.co/pipeline/feature-extraction/jhgan/ko-sroberta-multitask"
+            headers = {"Authorization": f"Bearer {hf_token}"}
+
+            def enc_hf_api(texts):
+                payload = {"inputs": list(texts), "options": {"wait_for_model": True}}
+                res = requests.post(api_url, headers=headers, json=payload, timeout=10)
+                if res.status_code == 200:
+                    arr = np.array(res.json())
+                    if len(arr.shape) == 3:
+                        arr = arr.mean(axis=1)
+                    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+                    norms[norms == 0] = 1.0
+                    return arr / norms
+                else:
+                    raise RuntimeError(f"HF API Error {res.status_code}: {res.text}")
+
+            # 워밍업 테스트
+            test_v = enc_hf_api(["테스트"])
+            if test_v is not None and len(test_v) > 0:
+                return enc_hf_api, {
+                    "ok": True,
+                    "backend": "ko-sroberta (Hugging Face API)",
+                    "detail": "클라우드 API 모드로 작동 중입니다. 메모리를 소비하지 않습니다."
+                }
+        except Exception:
+            pass  # API 연동 실패 시 아래 기존 로컬/폴백 방식 실행
+
     os.makedirs(MODEL_DIR, exist_ok=True)
     target = resolve_model_target(prefer_local_path)
 
