@@ -811,128 +811,84 @@ EMB_STATUS = {"backend": "미초기화", "detail": "", "ok": False}
 
 
 @st.cache_resource(show_spinner=False)
-def model_is_bundled():
-    """설치 폴더에 모델이 동봉되어 있는지 확인한다."""
-    if not os.path.isdir(BUNDLED_MODEL_DIR):
-        return False
-    need = ("config.json",)
-    has_cfg = all(os.path.isfile(os.path.join(BUNDLED_MODEL_DIR, f)) for f in need)
-    has_bin = bool(_glob.glob(os.path.join(BUNDLED_MODEL_DIR, "*.bin")) or
-                   _glob.glob(os.path.join(BUNDLED_MODEL_DIR, "*.safetensors")))
-    return has_cfg and has_bin
-
-
-def resolve_model_target(prefer_local_path=""):
-    """우선순위: 교사 지정 경로 > 설치 폴더 동봉 모델 > 캐시 > 모델명."""
-    p = (prefer_local_path or "").strip().strip('"')
-    if p and os.path.isdir(p):
-        return p
-    if model_is_bundled():
-        return BUNDLED_MODEL_DIR
-    return KO_SBERT_NAME
-
-
-def download_model_once(progress=None):
-    """개발 PC에서 1회만 실행: 모델을 내려받아 설치 폴더에 동봉 형태로 저장한다."""
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    set_offline(False)
-    try:
-        from sentence_transformers import SentenceTransformer
-        if progress:
-            progress("모델을 내려받는 중입니다. 수 분이 걸릴 수 있습니다.")
-        m = SentenceTransformer(KO_SBERT_NAME, cache_folder=MODEL_DIR)
-        m.save(BUNDLED_MODEL_DIR)
-        return True, "모델을 %s 에 저장했습니다." % BUNDLED_MODEL_DIR
-    except Exception as e:
-        return False, "%s: %s" % (type(e).__name__, str(e)[:200])
-    finally:
-        set_offline(True)
-
-
-@st.cache_resource(show_spinner=False)  # <-- clear() AttributeError 오류 해결
 def get_embedder(prefer_local_path=""):
     """
     우선순위
       1) Hugging Face API (st.secrets["HF_TOKEN"] 설정 시 클라우드 모드)
-      2) sentence-transformers + jhgan/ko-sroberta-multitask  (models/ 폴더에 캐시)
-      3) transformers + mean pooling  (동일 모델, 수동 풀링)
-      4) TF-IDF 문자 n-gram           (완전 오프라인 폴백)
-    반환: (encode_fn, info_dict)
+      2) sentence-transformers (로컬 실행)
+      3) transformers (로컬 실행)
+      4) TF-IDF (최종 폴백)
     """
     import requests
     import numpy as np
 
-    err1, err2 = "", ""
+    api_debug_info = []
 
-    # 1) Hugging Face Inference API 시도 (Streamlit Secrets에 HF_TOKEN이 있는 경우)
+    # 1) Hugging Face Inference API 시도
     hf_token = st.secrets.get("HF_TOKEN", "")
-    if hf_token:
-        try:
-            # 최신 Hugging Face Router API 엔드포인트
-            api_url = "https://router.huggingface.co/hf-inference/models/jhgan/ko-sroberta-multitask/pipeline/feature-extraction"
-            headers = {"Authorization": f"Bearer {hf_token}"}
+    if not hf_token:
+        api_debug_info.append("Secrets에 'HF_TOKEN'이 없거나 읽을 수 없습니다.")
+    else:
+        # 라우터 URL 및 기존 URL 모두 자동 시도
+        urls = [
+            "https://router.huggingface.co/hf-inference/models/jhgan/ko-sroberta-multitask/pipeline/feature-extraction",
+            "https://api-inference.huggingface.co/models/jhgan/ko-sroberta-multitask"
+        ]
+        headers = {"Authorization": f"Bearer {hf_token}"}
 
-            def enc_hf_api(texts):
-                payload = {"inputs": list(texts), "options": {"wait_for_model": True}}
-                res = requests.post(api_url, headers=headers, json=payload, timeout=15)
-                if res.status_code == 200:
-                    arr = np.array(res.json())
-                    if len(arr.shape) == 3:
-                        arr = arr.mean(axis=1)
-                    norms = np.linalg.norm(arr, axis=1, keepdims=True)
-                    norms[norms == 0] = 1.0
-                    return arr / norms
-                else:
-                    raise RuntimeError(f"HF API Error {res.status_code}: {res.text[:100]}")
+        for url in urls:
+            try:
+                def enc_hf_api(texts):
+                    payload = {"inputs": list(texts), "options": {"wait_for_model": True}}
+                    res = requests.post(url, headers=headers, json=payload, timeout=15)
+                    if res.status_code == 200:
+                        arr = np.array(res.json())
+                        if len(arr.shape) == 3:
+                            arr = arr.mean(axis=1)
+                        norms = np.linalg.norm(arr, axis=1, keepdims=True)
+                        norms[norms == 0] = 1.0
+                        return arr / norms
+                    else:
+                        raise RuntimeError(f"HTTP {res.status_code}: {res.text[:80]}")
 
-            # 워밍업 테스트
-            test_v = enc_hf_api(["테스트"])
-            if test_v is not None and len(test_v) > 0:
-                return enc_hf_api, {
-                    "ok": True,
-                    "backend": "ko-sroberta (Hugging Face API)",
-                    "detail": "클라우드 API 모드로 작동 중입니다. 메모리를 소비하지 않습니다."
-                }
-        except Exception as e_api:
-            err1 = f"API 오류({type(e_api).__name__})"
+                # 워밍업 테스트
+                test_v = enc_hf_api(["테스트"])
+                if test_v is not None and len(test_v) > 0:
+                    return enc_hf_api, {
+                        "ok": True,
+                        "backend": "ko-sroberta (Hugging Face API)",
+                        "detail": "클라우드 API 모드로 정상 작동 중입니다. (메모리 절약)"
+                    }
+            except Exception as e:
+                api_debug_info.append(f"API실패: {str(e)}")
 
+    # 2) sentence-transformers (로컬 PC용)
+    err1, err2 = "", ""
     os.makedirs(MODEL_DIR, exist_ok=True)
     target = resolve_model_target(prefer_local_path) if 'resolve_model_target' in globals() else "jhgan/ko-sroberta-multitask"
 
-    # 2) sentence-transformers (로컬 PC)
     try:
         from sentence_transformers import SentenceTransformer
-        try:
-            import torch
-            dev = "cuda" if torch.cuda.is_available() else "cpu"
-        except Exception:
-            dev = "cpu"
-        m = SentenceTransformer(target, cache_folder=MODEL_DIR, device=dev)
-
+        m = SentenceTransformer(target, cache_folder=MODEL_DIR, device="cpu")
         def enc_sbert(texts):
-            v = m.encode(list(texts), convert_to_numpy=True, show_progress_bar=False,
-                         batch_size=16, normalize_embeddings=True)
+            v = m.encode(list(texts), convert_to_numpy=True, show_progress_bar=False, normalize_embeddings=True)
             return np.asarray(v, dtype=np.float32)
-
-        return enc_sbert, {"backend": "ko-sroberta (sentence-transformers)",
-                           "detail": "%s · %s · 캐시: %s" % (target, dev, MODEL_DIR), "ok": True}
+        return enc_sbert, {"backend": "ko-sroberta (sentence-transformers)", "detail": target, "ok": True}
     except Exception as e1:
-        err1 = "%s: %s" % (type(e1).__name__, str(e1)[:120])
+        err1 = f"SBERT다운실패 ({str(e1)[:60]})"
 
-    # 3) transformers + mean pooling
+    # 3) transformers (로컬 PC용)
     try:
         import torch
         from transformers import AutoTokenizer, AutoModel
         tk = AutoTokenizer.from_pretrained(target, cache_dir=MODEL_DIR)
         md = AutoModel.from_pretrained(target, cache_dir=MODEL_DIR)
         md.eval()
-
         def enc_tf(texts, max_len=160, bs=16):
             outs = []
             texts = list(texts)
             for i in range(0, len(texts), bs):
-                enc = tk(texts[i:i + bs], return_tensors="pt", padding=True,
-                         truncation=True, max_length=max_len)
+                enc = tk(texts[i:i + bs], return_tensors="pt", padding=True, truncation=True, max_length=max_len)
                 with torch.no_grad():
                     o = md(**enc)
                 mask = enc["attention_mask"].unsqueeze(-1).float()
@@ -940,16 +896,13 @@ def get_embedder(prefer_local_path=""):
                 pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
                 outs.append(pooled.cpu().numpy())
             return np.vstack(outs).astype(np.float32)
-
-        return enc_tf, {"backend": "ko-sroberta (transformers mean-pooling)",
-                        "detail": "%s · 캐시: %s" % (target, MODEL_DIR), "ok": True}
+        return enc_tf, {"backend": "ko-sroberta (transformers)", "detail": target, "ok": True}
     except Exception as e2:
-        err2 = "%s: %s" % (type(e2).__name__, str(e2)[:120])
+        err2 = f"HF다운실패 ({str(e2)[:60]})"
 
     # 4) TF-IDF 폴백
     try:
         from sklearn.feature_extraction.text import TfidfVectorizer
-
         def enc_tfidf(texts):
             texts = [str(t) if str(t).strip() else "빈답안" for t in texts]
             vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), min_df=1, use_idf=False)
@@ -958,8 +911,12 @@ def get_embedder(prefer_local_path=""):
             n[n == 0] = 1.0
             return m / n
 
-        return enc_tfidf, {"backend": "TF-IDF 문자 n-gram (오프라인 폴백)",
-                           "detail": "ko-sroberta 미사용 · %s / %s" % (err1, err2), "ok": False}
+        debug_msg = " | ".join(api_debug_info) if api_debug_info else f"{err1} / {err2}"
+        return enc_tfidf, {
+            "backend": "TF-IDF 문자 n-gram (오프라인 폴백)",
+            "detail": f"원인: {debug_msg}",
+            "ok": False
+        }
     except Exception as e3:
         def enc_zero(texts):
             return np.zeros((len(list(texts)), 8), dtype=np.float32)
@@ -972,7 +929,6 @@ def cosine_to_ref(ref_vec, mat):
     mn = np.linalg.norm(mat, axis=1)
     mn[mn == 0] = 1.0
     return (mat @ ref) / (mn * rn)
-
 # =====================================================================
 # [6] 오개념 탐지 규칙 (부호·방향 역전 등)
 # =====================================================================
