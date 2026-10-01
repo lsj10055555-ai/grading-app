@@ -849,7 +849,7 @@ def download_model_once(progress=None):
         set_offline(True)
 
 
-@st.cache_resource(show_spinner=False)  # <-- [추가] clear() AttributeError 오류 해결
+@st.cache_resource(show_spinner=False)  # <-- clear() AttributeError 오류 해결
 def get_embedder(prefer_local_path=""):
     """
     우선순위
@@ -862,16 +862,19 @@ def get_embedder(prefer_local_path=""):
     import requests
     import numpy as np
 
+    err1, err2 = "", ""
+
     # 1) Hugging Face Inference API 시도 (Streamlit Secrets에 HF_TOKEN이 있는 경우)
     hf_token = st.secrets.get("HF_TOKEN", "")
     if hf_token:
         try:
-            api_url = "https://api-inference.huggingface.co/pipeline/feature-extraction/jhgan/ko-sroberta-multitask"
+            # 최신 Hugging Face Router API 엔드포인트
+            api_url = "https://router.huggingface.co/hf-inference/models/jhgan/ko-sroberta-multitask/pipeline/feature-extraction"
             headers = {"Authorization": f"Bearer {hf_token}"}
 
             def enc_hf_api(texts):
                 payload = {"inputs": list(texts), "options": {"wait_for_model": True}}
-                res = requests.post(api_url, headers=headers, json=payload, timeout=10)
+                res = requests.post(api_url, headers=headers, json=payload, timeout=15)
                 if res.status_code == 200:
                     arr = np.array(res.json())
                     if len(arr.shape) == 3:
@@ -880,7 +883,7 @@ def get_embedder(prefer_local_path=""):
                     norms[norms == 0] = 1.0
                     return arr / norms
                 else:
-                    raise RuntimeError(f"HF API Error {res.status_code}: {res.text}")
+                    raise RuntimeError(f"HF API Error {res.status_code}: {res.text[:100]}")
 
             # 워밍업 테스트
             test_v = enc_hf_api(["테스트"])
@@ -890,13 +893,13 @@ def get_embedder(prefer_local_path=""):
                     "backend": "ko-sroberta (Hugging Face API)",
                     "detail": "클라우드 API 모드로 작동 중입니다. 메모리를 소비하지 않습니다."
                 }
-        except Exception:
-            pass  # API 연동 실패 시 아래 기존 로컬/폴백 방식 실행
+        except Exception as e_api:
+            err1 = f"API 오류({type(e_api).__name__})"
 
     os.makedirs(MODEL_DIR, exist_ok=True)
-    target = resolve_model_target(prefer_local_path)
+    target = resolve_model_target(prefer_local_path) if 'resolve_model_target' in globals() else "jhgan/ko-sroberta-multitask"
 
-    # 1) sentence-transformers
+    # 2) sentence-transformers (로컬 PC)
     try:
         from sentence_transformers import SentenceTransformer
         try:
@@ -916,7 +919,7 @@ def get_embedder(prefer_local_path=""):
     except Exception as e1:
         err1 = "%s: %s" % (type(e1).__name__, str(e1)[:120])
 
-    # 2) transformers + mean pooling
+    # 3) transformers + mean pooling
     try:
         import torch
         from transformers import AutoTokenizer, AutoModel
@@ -943,7 +946,7 @@ def get_embedder(prefer_local_path=""):
     except Exception as e2:
         err2 = "%s: %s" % (type(e2).__name__, str(e2)[:120])
 
-    # 3) TF-IDF 폴백
+    # 4) TF-IDF 폴백
     try:
         from sklearn.feature_extraction.text import TfidfVectorizer
 
@@ -969,7 +972,6 @@ def cosine_to_ref(ref_vec, mat):
     mn = np.linalg.norm(mat, axis=1)
     mn[mn == 0] = 1.0
     return (mat @ ref) / (mn * rn)
-
 
 # =====================================================================
 # [6] 오개념 탐지 규칙 (부호·방향 역전 등)
