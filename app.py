@@ -810,14 +810,62 @@ def tokenize(text, okt=None):
 EMB_STATUS = {"backend": "미초기화", "detail": "", "ok": False}
 
 
+# --- [추가] model_is_bundled 함수 (NameError 해결용) ---
+def model_is_bundled():
+    try:
+        model_dir = globals().get("MODEL_DIR", "models")
+        if os.path.exists(model_dir) and len(os.listdir(model_dir)) > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+# ==========================================
+# 누락된 보조 함수 (Unresolved Reference 및 NameError 해결)
+# ==========================================
+
+def resolve_model_target(prefer_local_path=""):
+    """로컬 모델 경로 존재 여부를 확인하고 없으면 HF 모델명을 반환합니다."""
+    if prefer_local_path and os.path.exists(prefer_local_path):
+        return prefer_local_path
+    model_dir = globals().get("MODEL_DIR", "models")
+    local_target = os.path.join(model_dir, "ko-sroberta-multitask")
+    if os.path.exists(local_target):
+        return local_target
+    return "jhgan/ko-sroberta-multitask"
+
+
+def model_is_bundled():
+    """모델 파일이 설치 폴더에 동봉되어 있는지 확인합니다."""
+    try:
+        model_dir = globals().get("MODEL_DIR", "models")
+        local_target = os.path.join(model_dir, "ko-sroberta-multitask")
+        return os.path.exists(local_target) and len(os.listdir(local_target)) > 0
+    except Exception:
+        return False
+
+
+def download_model_once():
+    """'모델 준비 (개발 PC에서 1회)' 버튼 클릭 시 로컬에 모델을 보관합니다."""
+    try:
+        from sentence_transformers import SentenceTransformer
+        model_dir = globals().get("MODEL_DIR", "models")
+        target_dir = os.path.join(model_dir, "ko-sroberta-multitask")
+        os.makedirs(target_dir, exist_ok=True)
+        m = SentenceTransformer("jhgan/ko-sroberta-multitask")
+        m.save(target_dir)
+        return True, "로컬 모델 동봉 완료!"
+    except Exception as e:
+        return False, f"다운로드 실패: {str(e)}"
+# --- [교체] get_embedder 및 cosine_to_ref 함수 ---
 @st.cache_resource(show_spinner=False)
 def get_embedder(prefer_local_path=""):
     """
     우선순위
-      1) Hugging Face API (st.secrets["HF_TOKEN"] 설정 시 클라우드 모드)
-      2) sentence-transformers (로컬 실행)
-      3) transformers (로컬 실행)
-      4) TF-IDF (최종 폴백)
+      1) Hugging Face API (st.secrets["HF_TOKEN"] 클라우드 모드)
+      2) sentence-transformers (로컬 PC)
+      3) transformers (로컬 PC)
+      4) TF-IDF (최종 오프라인 폴백)
     """
     import requests
     import numpy as np
@@ -827,9 +875,8 @@ def get_embedder(prefer_local_path=""):
     # 1) Hugging Face Inference API 시도
     hf_token = st.secrets.get("HF_TOKEN", "")
     if not hf_token:
-        api_debug_info.append("Secrets에 'HF_TOKEN'이 없거나 읽을 수 없습니다.")
+        api_debug_info.append("Secrets에 'HF_TOKEN'이 설정되지 않았습니다.")
     else:
-        # 라우터 URL 및 기존 URL 모두 자동 시도
         urls = [
             "https://router.huggingface.co/hf-inference/models/jhgan/ko-sroberta-multitask/pipeline/feature-extraction",
             "https://api-inference.huggingface.co/models/jhgan/ko-sroberta-multitask"
@@ -857,32 +904,33 @@ def get_embedder(prefer_local_path=""):
                     return enc_hf_api, {
                         "ok": True,
                         "backend": "ko-sroberta (Hugging Face API)",
-                        "detail": "클라우드 API 모드로 정상 작동 중입니다. (메모리 절약)"
+                        "detail": "클라우드 API 모드로 정상 작동 중입니다."
                     }
             except Exception as e:
                 api_debug_info.append(f"API실패: {str(e)}")
 
-    # 2) sentence-transformers (로컬 PC용)
-    err1, err2 = "", ""
-    os.makedirs(MODEL_DIR, exist_ok=True)
+    model_dir = globals().get("MODEL_DIR", "models")
+    os.makedirs(model_dir, exist_ok=True)
     target = resolve_model_target(prefer_local_path) if 'resolve_model_target' in globals() else "jhgan/ko-sroberta-multitask"
 
+    # 2) sentence-transformers
+    err1, err2 = "", ""
     try:
         from sentence_transformers import SentenceTransformer
-        m = SentenceTransformer(target, cache_folder=MODEL_DIR, device="cpu")
+        m = SentenceTransformer(target, cache_folder=model_dir, device="cpu")
         def enc_sbert(texts):
             v = m.encode(list(texts), convert_to_numpy=True, show_progress_bar=False, normalize_embeddings=True)
             return np.asarray(v, dtype=np.float32)
         return enc_sbert, {"backend": "ko-sroberta (sentence-transformers)", "detail": target, "ok": True}
     except Exception as e1:
-        err1 = f"SBERT다운실패 ({str(e1)[:60]})"
+        err1 = f"SBERT실패({str(e1)[:50]})"
 
-    # 3) transformers (로컬 PC용)
+    # 3) transformers
     try:
         import torch
         from transformers import AutoTokenizer, AutoModel
-        tk = AutoTokenizer.from_pretrained(target, cache_dir=MODEL_DIR)
-        md = AutoModel.from_pretrained(target, cache_dir=MODEL_DIR)
+        tk = AutoTokenizer.from_pretrained(target, cache_dir=model_dir)
+        md = AutoModel.from_pretrained(target, cache_dir=model_dir)
         md.eval()
         def enc_tf(texts, max_len=160, bs=16):
             outs = []
@@ -898,7 +946,7 @@ def get_embedder(prefer_local_path=""):
             return np.vstack(outs).astype(np.float32)
         return enc_tf, {"backend": "ko-sroberta (transformers)", "detail": target, "ok": True}
     except Exception as e2:
-        err2 = f"HF다운실패 ({str(e2)[:60]})"
+        err2 = f"HF실패({str(e2)[:50]})"
 
     # 4) TF-IDF 폴백
     try:
