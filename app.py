@@ -1567,7 +1567,7 @@ def tab_session(cfg):
     ss = st.session_state
     st.markdown("**학생 접속 주소 설정**")
     c1, c2 = st.columns([3, 1])
-    base_default = ss.get("t_base", "http://%s:8501" % local_ip())
+    base_default = ss.get("t_base", "https://grading-app-lsj.streamlit.app/")
     ss["t_base"] = c1.text_input("기본 주소 (배포 시 배포 주소로 변경)", value=base_default)
     c2.metric("교사 PC 내부 IP", local_ip())
     st.caption("반드시 `streamlit run app.py --server.address 0.0.0.0` 으로 실행해야 학생 기기에서 접속됩니다.")
